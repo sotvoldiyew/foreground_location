@@ -1,0 +1,35 @@
+name: location_tracker
+description: GPS Location Tracker — BLoC + Yandex Maps + Background Service
+publish_to: none
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # BLoC
+  flutter_bloc: ^8.1.6
+  equatable: ^2.0.5
+
+  # Location
+  geolocator: ^13.0.1
+  flutter_compass: ^0.8.0
+
+  # Android background service (iOS da ishlatilmaydi)
+  flutter_background_service: ^5.0.5
+
+  # Notifications
+  flutter_local_notifications: ^18.0.0
+
+  # Yandex Maps
+  yandex_mapkit: 4.2.1
+
+  # Storage
+  shared_preferences: ^2.3.3
+  permission_handler: ^12.0.1
+
+flutter:
+  uses-material-design: true
