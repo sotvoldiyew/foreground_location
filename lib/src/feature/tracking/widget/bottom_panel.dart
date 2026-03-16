@@ -1,5 +1,3 @@
-// lib/src/feature/tracking/widget/bottom_panel.dart
-
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../bloc/tracking_bloc.dart';
@@ -201,7 +199,6 @@ class _InfoTile extends StatelessWidget {
   }
 }
 
-// ── Tugma — StatefulWidget, double-tap oldini oladi ─────────────────────────
 class _MainButton extends StatefulWidget {
   final TrackingState state;
   const _MainButton({required this.state});
@@ -214,7 +211,7 @@ class _MainButtonState extends State<_MainButton> {
   bool _tapping = false;
 
   Future<void> _onTap() async {
-    if (_tapping) return; // double-tap oldini olish
+    if (_tapping) return;
     setState(() => _tapping = true);
 
     final bloc = context.read<TrackingBloc>();
@@ -224,7 +221,6 @@ class _MainButtonState extends State<_MainButton> {
       bloc.add(const TrackingStartRequested());
     }
 
-    // Kichik delay — tez qayta bosilishdan saqlash
     await Future.delayed(const Duration(milliseconds: 800));
     if (mounted) setState(() => _tapping = false);
   }

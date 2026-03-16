@@ -38,30 +38,26 @@ class TrackingBloc extends Bloc<TrackingEvent, TrackingState> {
       ) async {
     emit(state.copyWith(status: TrackingStatus.loading));
 
-    // GPS stream tinglash
     await _locationSub?.cancel();
     _locationSub = _locationService.stream.listen((pts) {
-      debugPrint('🔵 Stream: ${pts.length} nuqta');
       if (!isClosed) add(TrackingPointsUpdated(pts));
     });
 
-    // Kompas tinglash
     await _compassSub?.cancel();
     _compassSub = CompassService.instance.headingStream.listen((h) {
       if (!isClosed) add(TrackingCompassUpdated(h));
     });
 
-    // Avvalgi sessiya davom etayaptimi
     if (_locationService.isRunning) {
-      debugPrint('🔵 Init: kuzatuv davom etmoqda');
-      final pts = _locationService.points;
+      debugPrint('🔵 Init: active');
       emit(state.copyWith(
-        status: TrackingStatus.active,
-        points: pts,
+        status:     TrackingStatus.active,
+        points:     _locationService.points,
+        followUser: true,
       ));
     } else {
       final saved = await LocationStorage.instance.load();
-      debugPrint('🔵 Init: stopped, ${saved.length} saqlangan nuqta');
+      debugPrint('🔵 Init: stopped, ${saved.length} nuqta');
       emit(state.copyWith(
         status: TrackingStatus.stopped,
         points: saved,
@@ -73,21 +69,21 @@ class TrackingBloc extends Bloc<TrackingEvent, TrackingState> {
       TrackingStartRequested event,
       Emitter<TrackingState> emit,
       ) async {
-    debugPrint('🔵 Start so\'raldi');
+    emit(state.copyWith(status: TrackingStatus.loading));
+
     final ok = await _locationService.start();
 
     if (ok) {
       debugPrint('🔵 Start OK');
-      emit(state.copyWith(
+      emit(const TrackingState(
         status:     TrackingStatus.active,
-        points:     [],
         followUser: true,
       ));
     } else {
       debugPrint('❌ Start FAIL');
       emit(state.copyWith(
         status:       TrackingStatus.error,
-        errorMessage: 'Location ruxsati berilmadi.\nSozlamalarga kiring va ruxsat bering.',
+        errorMessage: 'GPS ruxsati berilmadi.\nSozlamalarga kiring va ruxsat bering.',
       ));
     }
   }
@@ -105,7 +101,6 @@ class TrackingBloc extends Bloc<TrackingEvent, TrackingState> {
       TrackingPointsUpdated event,
       Emitter<TrackingState> emit,
       ) {
-    debugPrint('🔵 PointsUpdated: ${event.points.length} nuqta');
     emit(state.copyWith(
       status: TrackingStatus.active,
       points: event.points,
@@ -117,7 +112,7 @@ class TrackingBloc extends Bloc<TrackingEvent, TrackingState> {
       Emitter<TrackingState> emit,
       ) async {
     await LocationStorage.instance.clear();
-    emit(state.copyWith(points: []));
+    emit(state.copyWith(points: const []));
   }
 
   void _onFollowToggled(
@@ -125,6 +120,7 @@ class TrackingBloc extends Bloc<TrackingEvent, TrackingState> {
       Emitter<TrackingState> emit,
       ) {
     emit(state.copyWith(followUser: !state.followUser));
+    debugPrint('🔵 Follow: ${!state.followUser}');
   }
 
   void _onCompassUpdated(

@@ -1,13 +1,10 @@
-// lib/src/common/service/background_service.dart
-
-import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui';
 
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:location_tracker/src/common/service/notification_service.dart';
 
 import '../constants/app_constants.dart';
 import '../model/location_point.dart';
@@ -16,49 +13,54 @@ import 'location_storage.dart';
 @pragma('vm:entry-point')
 Future<void> onServiceStart(ServiceInstance service) async {
   DartPluginRegistrant.ensureInitialized();
-  // await NotificationService.instance.initForIsolate();
 
   if (service is AndroidServiceInstance) {
     await service.setAsForegroundService();
-    service.on(kEvtSetForeground).listen((_) => service.setAsForegroundService());
-    service.on(kEvtSetBackground).listen((_) => service.setAsBackgroundService());
+    await service.setForegroundNotificationInfo(
+      title:   '🟢 Joylashuv kuzatilmoqda',
+      content: 'GPS signal kutilmoqda...',
+    );
   }
 
+  final dio = Dio(
+    BaseOptions(
+      baseUrl:        'https://enpfgyujmeedyqispbtj.supabase.co/functions/v1',
+      connectTimeout: const Duration(seconds: 10),
+      receiveTimeout: const Duration(seconds: 10),
+      headers: {
+        'Authorization': 'Bearer sb_publishable_UlA1yHcU7DWeSEyC9HVH2w_-n0OBTzp',
+        'apikey':        'sb_publishable_UlA1yHcU7DWeSEyC9HVH2w_-n0OBTzp',
+        'Content-Type':  'application/json',
+      },
+    ),
+  );
+
   bool shouldRun = true;
+
   service.on(kEvtStop).listen((_) async {
+    debugPrint('⏹️ [BG] Stop');
     shouldRun = false;
-    await NotificationService.instance.cancel();
     await LocationStorage.instance.setRunning(false);
     service.stopSelf();
-    debugPrint('⏹️ Service to\'xtatildi');
   });
 
-  // Yangi sessiya — eski nuqtalarni o'chir
-  await LocationStorage.instance.clear();
-  final List<LocationPoint> points = [];
+  final points = <LocationPoint>[];
   LocationPoint? lastSaved;
 
-  debugPrint('🚀 BgService boshlandi — yangi sessiya');
+  debugPrint('🚀 [BG] Started');
 
   await for (final pos in Geolocator.getPositionStream(
     locationSettings: _buildLocationSettings(),
   )) {
     if (!shouldRun) break;
 
-    final speedKmh = pos.speed < 0 ? 0.0 : pos.speed * 3.6;
-    debugPrint(
-      '📡 GPS: lat=${pos.latitude.toStringAsFixed(6)} '
-          'lng=${pos.longitude.toStringAsFixed(6)} '
-          'acc=±${pos.accuracy.toStringAsFixed(1)}m '
-          'spd=${speedKmh.toStringAsFixed(1)}km/h',
-    );
-
-    // Accuracy filtri
+    if (pos.latitude == 0.0 && pos.longitude == 0.0) continue;
     if (pos.accuracy > kMaxAccuracyMeters) {
-      debugPrint('⚠️ Yomon signal (${pos.accuracy.toStringAsFixed(1)}m) — skip');
+      debugPrint('⚠️ [BG] Yomon signal — skip');
       continue;
     }
 
+    final speedKmh = pos.speed < 0 ? 0.0 : pos.speed * 3.6;
     final point = LocationPoint(
       latitude:  pos.latitude,
       longitude: pos.longitude,
@@ -68,55 +70,56 @@ Future<void> onServiceStart(ServiceInstance service) async {
       timestamp: DateTime.now(),
     );
 
-    // Minimum masofa filtri
     if (lastSaved != null) {
       final dist = _haversine(
         lastSaved.latitude, lastSaved.longitude,
         point.latitude,     point.longitude,
       );
       if (dist < kMinDistanceMeters) {
-        debugPrint('📌 Joyida (${dist.toStringAsFixed(1)}m) — skip');
+        debugPrint('📌 [BG] Joyida (${dist.toStringAsFixed(1)}m) — skip');
         continue;
       }
     }
 
     lastSaved = point;
     points.add(point);
-    if (points.length > kMaxPoints) {
-      points.removeAt(0);
+    if (points.length > kMaxPoints) points.removeAt(0);
+
+    await LocationStorage.instance.save(List.of(points));
+
+    try {
+      final response = await dio.post<Map<String, dynamic>>(
+        '/save-location',
+        data: {
+          'latitude':  point.latitude,
+          'longitude': point.longitude,
+          'head':      point.heading,
+        },
+      );
+      final id = response.data?['data']?['id'];
+      debugPrint('✅ [BG API] id=$id');
+    } on DioException catch (e) {
+      debugPrint('⚠️ [BG API] ${e.type}: ${e.message}');
+    } catch (e) {
+      debugPrint('❌ [BG API] $e');
     }
 
-    // Storage ga saqlash
-    await LocationStorage.instance.save(points);
+    service.invoke(kEvtLocationUpdate, point.toMap());
 
-    // Notification yangilash
-    // await NotificationService.instance.showTracking(point, points.length);
+    if (service is AndroidServiceInstance) {
+      await service.setForegroundNotificationInfo(
+        title:   '🟢 Joylashuv kuzatilmoqda',
+        content: '${speedKmh.toStringAsFixed(0)} km/h  •  '
+            '${point.headingLabel}  •  ${points.length} nuqta',
+      );
+    }
 
-    // UI ga event yuborish — to'liq nuqtalar ro'yxati bilan
-    service.invoke(kEvtLocationUpdate, {
-      'count': points.length,
-      'last':  point.toMap(),
-    });
-
-    debugPrint('✅ [${points.length}] ${point.latitude.toStringAsFixed(6)}, '
-        '${point.longitude.toStringAsFixed(6)} | '
-        '±${point.accuracy.toStringAsFixed(0)}m | '
-        '${speedKmh.toStringAsFixed(1)}km/h');
+    debugPrint('✅ [BG] [${points.length}] '
+        '${point.latitude.toStringAsFixed(5)}, '
+        '${point.longitude.toStringAsFixed(5)}');
   }
 
-  debugPrint('🔚 GPS stream tugadi');
-}
-
-double _haversine(double lat1, double lon1, double lat2, double lon2) {
-  const R    = 6371000.0;
-  final dLat = (lat2 - lat1) * math.pi / 180;
-  final dLon = (lon2 - lon1) * math.pi / 180;
-  final a    = math.sin(dLat / 2) * math.sin(dLat / 2) +
-      math.cos(lat1 * math.pi / 180) *
-          math.cos(lat2 * math.pi / 180) *
-          math.sin(dLon / 2) *
-          math.sin(dLon / 2);
-  return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
+  debugPrint('🔚 [BG] GPS stream tugadi');
 }
 
 @pragma('vm:entry-point')
@@ -142,129 +145,21 @@ LocationSettings _buildLocationSettings() {
     foregroundNotificationConfig: const ForegroundNotificationConfig(
       notificationChannelName: kNotifChannelName,
       notificationTitle:       '🟢 Joylashuv kuzatilmoqda',
-      notificationText:        'Fon rejimida ishlayapti...',
+      notificationText:        'GPS yozilmoqda...',
       enableWakeLock:          true,
       enableWifiLock:          true,
+      setOngoing:              true,
     ),
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// BgService — UI tomonida ishlatiladi
-// ─────────────────────────────────────────────────────────────────────────────
-
-class BgService {
-  BgService._();
-  static final BgService instance = BgService._();
-
-  final _flutter = FlutterBackgroundService();
-
-  // Stream controller — bloc ga nuqtalar uzatadi
-  final _ctrl = StreamController<List<LocationPoint>>.broadcast();
-  Stream<List<LocationPoint>> get stream => _ctrl.stream;
-
-  StreamSubscription? _eventSub;
-
-  Future<void> init() async {
-    await _flutter.configure(
-      androidConfiguration: AndroidConfiguration(
-        onStart:                         onServiceStart,
-        isForegroundMode:                true,
-        autoStart:                       false,
-        notificationChannelId:           kNotifChannel,
-        foregroundServiceNotificationId: kNotifId,
-        initialNotificationTitle:        '🟢 Joylashuv kuzatilmoqda',
-        initialNotificationContent:      '"Boshlash" ni bosing',
-        foregroundServiceTypes:          [AndroidForegroundType.location],
-      ),
-      iosConfiguration: IosConfiguration(
-        onForeground: onServiceStart,
-        onBackground: onIosBackground,
-        autoStart:    false,
-      ),
-    );
-    debugPrint('🔧 BgService.init() tayyor');
-  }
-
-  Future<bool> start() async {
-    final ok = await _requestPermissions();
-    if (!ok) {
-      debugPrint('❌ GPS ruxsati yo\'q');
-      return false;
-    }
-
-    // Eski subscription bekor qilish
-    await _eventSub?.cancel();
-    _eventSub = null;
-
-    await _flutter.startService();
-    await LocationStorage.instance.setRunning(true);
-
-    // Service ishga tushishi uchun kut, keyin tinglash
-    await Future.delayed(const Duration(milliseconds: 600));
-    _startListening();
-
-    debugPrint('▶️ BgService.start() OK');
-    return true;
-  }
-
-  Future<void> stop() async {
-    _flutter.invoke(kEvtStop);
-    await LocationStorage.instance.setRunning(false);
-    await _eventSub?.cancel();
-    _eventSub = null;
-    debugPrint('⏹️ BgService.stop()');
-  }
-
-  Future<bool> get isRunning => _flutter.isRunning();
-
-  /// App qayta ochilganda storage dan nuqtalarni yuklaydi
-  Future<void> reloadPoints() async {
-    final pts = await LocationStorage.instance.load();
-    if (pts.isNotEmpty) {
-      _ctrl.add(pts);
-      debugPrint('🔄 reloadPoints: ${pts.length} nuqta');
-    }
-    // Tinglashni ham boshlash
-    await _eventSub?.cancel();
-    _eventSub = null;
-    _startListening();
-  }
-
-  void _startListening() {
-    if (_eventSub != null) return;
-
-    _eventSub = _flutter.on(kEvtLocationUpdate).listen((data) async {
-      if (data == null) {
-        debugPrint('⚠️ Event null keldi');
-        return;
-      }
-      // Storage dan to'liq ro'yxatni o'qish
-      final pts = await LocationStorage.instance.load();
-      debugPrint('📨 Event → storage: ${pts.length} nuqta → stream ga');
-      if (!_ctrl.isClosed) {
-        _ctrl.add(pts);
-      }
-    });
-
-    debugPrint('👂 BgService tinglash boshlandi');
-  }
-
-  void dispose() {
-    _eventSub?.cancel();
-    _ctrl.close();
-  }
-}
-
-Future<bool> _requestPermissions() async {
-  if (!await Geolocator.isLocationServiceEnabled()) {
-    debugPrint('❌ GPS o\'chirilgan');
-    return false;
-  }
-  var perm = await Geolocator.checkPermission();
-  if (perm == LocationPermission.denied) {
-    perm = await Geolocator.requestPermission();
-  }
-  return perm != LocationPermission.denied &&
-      perm != LocationPermission.deniedForever;
+double _haversine(double lat1, double lon1, double lat2, double lon2) {
+  const R    = 6371000.0;
+  final dLat = (lat2 - lat1) * math.pi / 180;
+  final dLon = (lon2 - lon1) * math.pi / 180;
+  final a    = math.sin(dLat / 2) * math.sin(dLat / 2) +
+      math.cos(lat1 * math.pi / 180) *
+          math.cos(lat2 * math.pi / 180) *
+          math.sin(dLon / 2) * math.sin(dLon / 2);
+  return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
 }

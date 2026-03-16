@@ -1,5 +1,3 @@
-// lib/src/common/service/location_service.dart
-
 import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui';
@@ -10,75 +8,167 @@ import 'package:geolocator/geolocator.dart';
 
 import '../constants/app_constants.dart';
 import '../model/location_point.dart';
+import 'background_service.dart';
 import 'location_storage.dart';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ANDROID BACKGROUND ISOLATE
-// ─────────────────────────────────────────────────────────────────────────────
+const double kMaxSpeedMps = 100.0;
 
-@pragma('vm:entry-point')
-Future<void> onAndroidServiceStart(ServiceInstance service) async {
-  DartPluginRegistrant.ensureInitialized();
 
-  debugPrint('🚀 [BG] Android background isolate started');
+class LocationService {
+  LocationService._();
+  static final LocationService instance = LocationService._();
 
-  if (service is AndroidServiceInstance) {
-    await service.setAsForegroundService();
-    await service.setForegroundNotificationInfo(
-      title: '🟢 Joylashuv kuzatilmoqda',
-      content: 'GPS signal kutilmoqda...',
-    );
-    debugPrint('🔔 [BG] Foreground notification ko\'rsatildi');
+  final _ctrl     = StreamController<List<LocationPoint>>.broadcast();
+  Stream<List<LocationPoint>> get stream => _ctrl.stream;
+
+  final _liveCtrl = StreamController<LocationPoint>.broadcast();
+  Stream<LocationPoint> get liveStream => _liveCtrl.stream;
+
+  StreamSubscription<Position>? _iosSub;
+  StreamSubscription<Position>? _androidUiSub;
+  StreamSubscription?           _bgServiceSub;
+
+  final List<LocationPoint> _points = [];
+  LocationPoint? _lastSaved;
+  bool _running           = false;
+  bool _androidConfigured = false;
+  bool _initialized       = false;
+
+  bool get isRunning => _running;
+  List<LocationPoint> get points => List.unmodifiable(_points);
+
+  Future<void> init() async {
+    debugPrint('🔧 [UI] init()');
+
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      await _configureAndroid();
+
+      final svc            = FlutterBackgroundService();
+      final alreadyRunning = await svc.isRunning();
+
+      if (alreadyRunning) {
+        debugPrint('✅ [UI] Service ishlayapti — davom ettirilmoqda');
+        _running = true;
+
+        final saved = await LocationStorage.instance.load();
+        if (saved.isNotEmpty) {
+          _points.clear();
+          _points.addAll(saved);
+          _lastSaved = _points.last;
+          if (!_ctrl.isClosed) _ctrl.add(List.unmodifiable(_points));
+          debugPrint('🔄 [UI] ${_points.length} saqlangan nuqta yuklandi');
+        }
+
+        _listenBgService(svc);
+        _startAndroidUiStream();
+        _initialized = true;
+        return;
+      }
+    }
+
+    await LocationStorage.instance.setRunning(false);
+    final saved = await LocationStorage.instance.load();
+    if (saved.isNotEmpty) {
+      _points.addAll(saved);
+      if (!_ctrl.isClosed) _ctrl.add(List.unmodifiable(_points));
+      debugPrint('🔄 [UI] ${_points.length} saqlangan nuqta (stopped)');
+    }
+
+    _initialized = true;
   }
 
-  bool shouldRun = true;
+  Future<void> onResume() async {
+    if (defaultTargetPlatform != TargetPlatform.android) return;
+    debugPrint('📱 [UI] onResume()');
 
-  service.on(kEvtStop).listen((_) async {
-    debugPrint('⏹️ [BG] Stop event keldi');
-    shouldRun = false;
-    await LocationStorage.instance.setRunning(false);
-    service.stopSelf();
-  });
+    final svc     = FlutterBackgroundService();
+    final running = await svc.isRunning();
 
-  await LocationStorage.instance.clear();
-  final points   = <LocationPoint>[];
-  LocationPoint? lastSaved;
+    if (running && !_running) {
+      debugPrint('🔄 [UI] Service hali ishlayapti — qayta ulamoqda');
+      _running = true;
 
-  debugPrint('📡 [BG] GPS stream boshlanmoqda...');
+      final saved = await LocationStorage.instance.load();
+      if (saved.isNotEmpty) {
+        _points.clear();
+        _points.addAll(saved);
+        _lastSaved = _points.last;
+        if (!_ctrl.isClosed) _ctrl.add(List.unmodifiable(_points));
+      }
 
-  StreamSubscription<Position>? gpsSub;
+      _listenBgService(svc);
+      _startAndroidUiStream();
+    } else if (!running && _running) {
+      debugPrint('⚠️ [UI] Service to\'xtagan — state reset');
+      _running = false;
+      await _bgServiceSub?.cancel();
+      await _androidUiSub?.cancel();
+      _bgServiceSub = null;
+      _androidUiSub = null;
+    }
+  }
 
-  gpsSub = Geolocator.getPositionStream(
-    locationSettings: AndroidSettings(
-      accuracy:         LocationAccuracy.high,
-      distanceFilter:   kDistanceFilterMeters,
-      intervalDuration: const Duration(seconds: 1),
-      foregroundNotificationConfig: const ForegroundNotificationConfig(
-        notificationChannelName: kNotifChannelName,
-        notificationTitle:       '🟢 Joylashuv kuzatilmoqda',
-        notificationText:        'GPS yozilmoqda...',
-        enableWakeLock:          true,
-        enableWifiLock:          true,
-        setOngoing:              true,
+  bool _isJump(LocationPoint point) {
+    if (_lastSaved == null) return false;
+    final dist = _haversine(
+      _lastSaved!.latitude, _lastSaved!.longitude,
+      point.latitude,       point.longitude,
+    );
+    final timeDiff = point.timestamp
+        .difference(_lastSaved!.timestamp)
+        .inMilliseconds / 1000.0;
+    if (timeDiff <= 0) return false;
+    final speedMps = dist / timeDiff;
+    if (speedMps > kMaxSpeedMps) {
+      debugPrint('⚠️ GPS sakrash: ${speedMps.toStringAsFixed(1)} m/s — o\'tkazildi');
+      return true;
+    }
+    return false;
+  }
+
+  void _listenBgService(FlutterBackgroundService svc) {
+    _bgServiceSub?.cancel();
+    _bgServiceSub = svc.on(kEvtLocationUpdate).listen((data) {
+      if (data == null) return;
+      try {
+        final point = LocationPoint.fromMap(Map<String, dynamic>.from(data));
+
+        if (point.latitude == 0.0 && point.longitude == 0.0) return;
+
+        if (_points.isNotEmpty) {
+          final last = _points.last;
+          if (last.latitude  == point.latitude &&
+              last.longitude == point.longitude) return;
+        }
+
+        if (_isJump(point)) return;
+
+        _lastSaved = point;
+        _points.add(point);
+        if (_points.length > kMaxPoints) _points.removeAt(0);
+        if (!_ctrl.isClosed) _ctrl.add(List.unmodifiable(_points));
+        debugPrint('📍 [BG→UI] [${_points.length}] '
+            '${point.latitude.toStringAsFixed(5)}, '
+            '${point.longitude.toStringAsFixed(5)}');
+      } catch (e) {
+        debugPrint('❌ [UI] BG parse xato: $e');
+      }
+    });
+    debugPrint('👂 [UI] BG service tinglash boshlandi');
+  }
+
+  void _startAndroidUiStream() {
+    _androidUiSub?.cancel();
+    _androidUiSub = Geolocator.getPositionStream(
+      locationSettings: AndroidSettings(
+        accuracy:         LocationAccuracy.high,
+        distanceFilter:   0,
+        intervalDuration: const Duration(milliseconds: 500),
       ),
-    ),
-  ).listen(
-        (pos) async {
-      if (!shouldRun) {
-        await gpsSub?.cancel();
-        return;
-      }
-
-      final speedKmh = pos.speed < 0 ? 0.0 : pos.speed * 3.6;
-      debugPrint('📡 [BG] GPS: ${pos.latitude.toStringAsFixed(5)}, '
-          '${pos.longitude.toStringAsFixed(5)} '
-          'acc=±${pos.accuracy.toStringAsFixed(0)}m '
-          'spd=${speedKmh.toStringAsFixed(1)}km/h');
-
-      if (pos.accuracy > kMaxAccuracyMeters) {
-        debugPrint('⚠️ [BG] Yomon signal — skip');
-        return;
-      }
+    ).listen((pos) {
+      if (!_running) return;
+      if (pos.accuracy > kMaxAccuracyMeters) return;
+      if (pos.latitude == 0.0 && pos.longitude == 0.0) return;
 
       final point = LocationPoint(
         latitude:  pos.latitude,
@@ -89,127 +179,37 @@ Future<void> onAndroidServiceStart(ServiceInstance service) async {
         timestamp: DateTime.now(),
       );
 
-      if (lastSaved != null) {
-        final dist = _haversine(
-          lastSaved!.latitude, lastSaved!.longitude,
-          point.latitude,      point.longitude,
-        );
-        if (dist < kMinDistanceMeters) {
-          debugPrint('📌 [BG] Joyida (${dist.toStringAsFixed(1)}m) — skip');
-          return;
-        }
-      }
-
-      lastSaved = point;
-      points.add(point);
-      if (points.length > kMaxPoints) points.removeAt(0);
-
-      await LocationStorage.instance.save(List.of(points));
-      service.invoke(kEvtLocationUpdate, point.toMap());
-
-      if (service is AndroidServiceInstance) {
-        await service.setForegroundNotificationInfo(
-          title: '🟢 Joylashuv kuzatilmoqda',
-          content: '${speedKmh.toStringAsFixed(0)} km/h  •  '
-              '${point.headingLabel}  •  ${points.length} nuqta',
-        );
-      }
-
-      debugPrint('✅ [BG] [${points.length}] '
-          '${point.latitude.toStringAsFixed(5)}, '
-          '${point.longitude.toStringAsFixed(5)}');
-    },
-    onError: (e) => debugPrint('❌ [BG] GPS xato: $e'),
-    cancelOnError: false,
-  );
-
-  debugPrint('👂 [BG] GPS stream tinglash boshlandi');
-}
-
-@pragma('vm:entry-point')
-Future<bool> onIosBackground(ServiceInstance service) async {
-  DartPluginRegistrant.ensureInitialized();
-  return true;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// LocationService — UI (asosiy isolate)
-// ─────────────────────────────────────────────────────────────────────────────
-
-class LocationService {
-  LocationService._();
-  static final LocationService instance = LocationService._();
-
-  final _ctrl = StreamController<List<LocationPoint>>.broadcast();
-  Stream<List<LocationPoint>> get stream => _ctrl.stream;
-
-  StreamSubscription<Position>? _iosSub;
-  StreamSubscription?           _androidSub;
-
-  final List<LocationPoint> _points = [];
-  LocationPoint? _lastSaved;
-  bool _running           = false;
-  bool _androidConfigured = false;
-
-  bool get isRunning => _running;
-  List<LocationPoint> get points => List.unmodifiable(_points);
-
-  Future<void> init() async {
-    debugPrint('🔧 [UI] LocationService.init()');
-
-    if (defaultTargetPlatform == TargetPlatform.android) {
-      await _configureAndroid();
-
-      // Android da service hali ishlayotgan bo'lsa to'xtatish
-      // (oldingi session crash bo'lgan bo'lishi mumkin)
-      final svc = FlutterBackgroundService();
-      final alreadyRunning = await svc.isRunning();
-      if (alreadyRunning) {
-        debugPrint('⚠️ [UI] Init: service allaqachon ishlayapti — to\'xtatilmoqda');
-        svc.invoke(kEvtStop);
-        await Future.delayed(const Duration(milliseconds: 500));
-      }
-    }
-
-    // Storage ni tozalash — har safar app ochilganda "stopped" holatdan boshla
-    await LocationStorage.instance.setRunning(false);
-    debugPrint('🔧 [UI] Running flag = false (reset)');
-
-    // Oldingi sessiya nuqtalarini yuklash (ko'rsatish uchun, kuzatuv emas)
-    final saved = await LocationStorage.instance.load();
-    if (saved.isNotEmpty) {
-      _points.addAll(saved);
-      if (!_ctrl.isClosed) _ctrl.add(List.unmodifiable(_points));
-      debugPrint('🔄 [UI] ${_points.length} oldingi nuqta yuklandi (display uchun)');
-    }
-
-    debugPrint('🔧 [UI] LocationService.init() done — foydalanuvchi Boshlash bossin');
+      if (!_liveCtrl.isClosed) _liveCtrl.add(point);
+    });
+    debugPrint('📡 [UI] Android live GPS stream boshlandi');
   }
 
   Future<void> _configureAndroid() async {
     if (_androidConfigured) return;
     await FlutterBackgroundService().configure(
       androidConfiguration: AndroidConfiguration(
-        onStart:                         onAndroidServiceStart,
+        onStart:                         onServiceStart,
         isForegroundMode:                true,
         autoStart:                       false,
+        autoStartOnBoot:                 false,
         notificationChannelId:           kNotifChannel,
         foregroundServiceNotificationId: kNotifId,
         initialNotificationTitle:        '🟢 Joylashuv kuzatilmoqda',
-        initialNotificationContent:      'GPS tayyor',
+        initialNotificationContent:      '"Boshlash" ni bosing',
         foregroundServiceTypes:          [AndroidForegroundType.location],
       ),
-      iosConfiguration: IosConfiguration(autoStart: false),
+      iosConfiguration: IosConfiguration(
+        onForeground: onServiceStart,
+        onBackground: onIosBackground,
+        autoStart:    false,
+      ),
     );
     _androidConfigured = true;
-    debugPrint('🔧 [UI] Android service configured');
+    debugPrint('🔧 [UI] Android configured');
   }
 
   Future<bool> start() async {
-    if (_running) {
-      debugPrint('⚠️ [UI] Allaqachon ishlayapti');
-      return true;
-    }
+    if (_running) return true;
 
     final ok = await _requestPermissions();
     if (!ok) return false;
@@ -226,7 +226,7 @@ class LocationService {
     }
 
     _running = true;
-    debugPrint('▶️ [UI] LocationService started');
+    debugPrint('▶️ [UI] Started');
     return true;
   }
 
@@ -236,19 +236,26 @@ class LocationService {
 
     if (defaultTargetPlatform == TargetPlatform.android) {
       FlutterBackgroundService().invoke(kEvtStop);
-      await _androidSub?.cancel();
-      _androidSub = null;
-      debugPrint('⏹️ [UI] Android service stop event yuborildi');
+      await _bgServiceSub?.cancel();
+      await _androidUiSub?.cancel();
+      _bgServiceSub = null;
+      _androidUiSub = null;
     } else {
       await _iosSub?.cancel();
       _iosSub = null;
-      debugPrint('⏹️ [UI] iOS GPS stream to\'xtatildi');
     }
 
     await LocationStorage.instance.setRunning(false);
+    debugPrint('⏹️ [UI] Stopped');
   }
 
-  // ── iOS ───────────────────────────────────────────────────────────────────
+  Future<void> _startAndroid() async {
+    final svc = FlutterBackgroundService();
+    await svc.startService();
+    debugPrint('🔧 [UI] startService() ok');
+    _listenBgService(svc);
+    _startAndroidUiStream();
+  }
 
   Future<void> _startIos() async {
     await _iosSub?.cancel();
@@ -265,16 +272,10 @@ class LocationService {
       onError: (e) => debugPrint('❌ [UI] iOS GPS xato: $e'),
       cancelOnError: false,
     );
-    debugPrint('📡 [UI] iOS GPS stream boshlandi');
+    debugPrint('📡 [UI] iOS GPS boshlandi');
   }
 
   void _onIosPosition(Position pos) {
-    final speedKmh = pos.speed < 0 ? 0.0 : pos.speed * 3.6;
-    debugPrint('📡 [UI] iOS: ${pos.latitude.toStringAsFixed(5)}, '
-        '${pos.longitude.toStringAsFixed(5)} '
-        'acc=±${pos.accuracy.toStringAsFixed(0)}m '
-        'spd=${speedKmh.toStringAsFixed(1)}km/h');
-
     if (!_running) return;
     if (pos.accuracy > kMaxAccuracyMeters) return;
 
@@ -295,58 +296,29 @@ class LocationService {
       if (dist < kMinDistanceMeters) return;
     }
 
+    if (_isJump(point)) return;
+
     _lastSaved = point;
     _points.add(point);
     if (_points.length > kMaxPoints) _points.removeAt(0);
 
     LocationStorage.instance.save(List.of(_points));
     if (!_ctrl.isClosed) _ctrl.add(List.unmodifiable(_points));
+    if (!_liveCtrl.isClosed) _liveCtrl.add(point);
 
     debugPrint('✅ [UI] iOS [${_points.length}] '
         '${point.latitude.toStringAsFixed(5)}, '
         '${point.longitude.toStringAsFixed(5)}');
   }
 
-  // ── Android ───────────────────────────────────────────────────────────────
-
-  Future<void> _startAndroid() async {
-    await _androidSub?.cancel();
-    _androidSub = null;
-
-    final svc = FlutterBackgroundService();
-    final ok  = await svc.startService();
-    debugPrint('🔧 [UI] startService() => $ok');
-
-    await Future.delayed(const Duration(milliseconds: 800));
-
-    final running = await svc.isRunning();
-    debugPrint('🔧 [UI] isRunning after 800ms: $running');
-
-    if (!running) {
-      debugPrint('❌ [UI] Service ishga tushmadi!');
-    }
-
-    _androidSub = svc.on(kEvtLocationUpdate).listen((data) async {
-      if (data == null) return;
-      final pts = await LocationStorage.instance.load();
-      if (pts.isEmpty) return;
-      _points.clear();
-      _points.addAll(pts);
-      if (!_ctrl.isClosed) _ctrl.add(List.unmodifiable(_points));
-      debugPrint('📨 [UI] ${_points.length} nuqta → UI');
-    });
-
-    debugPrint('👂 [UI] Android event listener tayyor');
-  }
-
   void dispose() {
     _iosSub?.cancel();
-    _androidSub?.cancel();
+    _bgServiceSub?.cancel();
+    _androidUiSub?.cancel();
     _ctrl.close();
+    _liveCtrl.close();
   }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
 
 double _haversine(double lat1, double lon1, double lat2, double lon2) {
   const R    = 6371000.0;
@@ -373,6 +345,5 @@ Future<bool> _requestPermissions() async {
     debugPrint('❌ [UI] GPS ruxsati yo\'q: $perm');
     return false;
   }
-  debugPrint('✅ [UI] GPS ruxsati: $perm');
   return true;
 }

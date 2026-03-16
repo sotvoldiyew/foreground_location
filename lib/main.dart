@@ -3,7 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-import 'src/common/service/background_service.dart';
+import 'src/common/service/location_service.dart';
 import 'src/common/service/notification_service.dart';
 import 'src/feature/tracking/bloc/tracking_bloc.dart';
 import 'src/feature/tracking/screen/map_screen.dart';
@@ -19,15 +19,37 @@ void main() async {
   );
 
   await Permission.notification.request();
-
   await NotificationService.instance.init();
-  await BgService.instance.init();
+
+  await LocationService.instance.init();
 
   runApp(const App());
 }
 
-class App extends StatelessWidget {
+class App extends StatefulWidget {
   const App({super.key});
+  @override
+  State<App> createState() => _AppState();
+}
+
+class _AppState extends State<App> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      LocationService.instance.onResume();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {

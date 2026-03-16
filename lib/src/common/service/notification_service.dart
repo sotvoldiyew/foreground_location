@@ -1,5 +1,3 @@
-// lib/src/common/service/notification_service.dart
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
@@ -32,7 +30,6 @@ class NotificationService {
           .resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin>();
 
-      // Channel yaratish — importance LOW, ovoz va vibrosiz
       await androidPlugin?.createNotificationChannel(
         const AndroidNotificationChannel(
           kNotifChannel,
@@ -45,7 +42,6 @@ class NotificationService {
         ),
       );
 
-      // Android 13+ notification ruxsati
       await androidPlugin?.requestNotificationsPermission();
     }
 
@@ -53,7 +49,6 @@ class NotificationService {
     debugPrint('🔔 NotificationService tayyor');
   }
 
-  /// Boshlash paytida birinchi notification — "Kuzatuv boshlandi"
   Future<void> showStart() async {
     if (!_initialized) await init();
     if (defaultTargetPlatform != TargetPlatform.android) return;
@@ -68,10 +63,10 @@ class NotificationService {
           kNotifChannelName,
           importance:  Importance.low,
           priority:    Priority.low,
-          ongoing:     true,     // o'chirib bo'lmaydi
+          ongoing:     true,
           autoCancel:  false,
           showWhen:    false,
-          onlyAlertOnce: true,   // faqat birinchi marta ovoz/vibro
+          onlyAlertOnce: true,
           icon:        '@mipmap/ic_launcher',
         ),
       ),
@@ -79,7 +74,6 @@ class NotificationService {
     debugPrint('🔔 Start notification ko\'rsatildi');
   }
 
-  /// Har yangi GPS nuqtada — notification yangilanadi
   Future<void> update(LocationPoint point, int count) async {
     if (!_initialized) await init();
     if (defaultTargetPlatform != TargetPlatform.android) return;
@@ -113,7 +107,6 @@ class NotificationService {
     );
   }
 
-  /// To'xtatganda notification o'chiriladi
   Future<void> cancel() async {
     if (!_initialized) return;
     await _plugin.cancel(kNotifId);

@@ -33,21 +33,23 @@ class LocationPoint extends Equatable {
   }
 
   Map<String, dynamic> toMap() => {
-    'lat': latitude,
-    'lng': longitude,
-    'hdg': heading,
-    'spd': speed,
-    'acc': accuracy,
-    'ts':  timestamp.millisecondsSinceEpoch,
+    'latitude':  latitude,
+    'longitude': longitude,
+    'heading':   heading,
+    'speed':     speed,
+    'accuracy':  accuracy,
+    'timestamp': timestamp.toIso8601String(),
   };
 
-  factory LocationPoint.fromMap(Map<String, dynamic> m) => LocationPoint(
-    latitude:  (m['lat'] as num).toDouble(),
-    longitude: (m['lng'] as num).toDouble(),
-    heading:   (m['hdg'] as num?)?.toDouble() ?? 0.0,
-    speed:     ((m['spd'] as num?)?.toDouble() ?? 0.0).clamp(0, double.infinity),
-    accuracy:  (m['acc'] as num?)?.toDouble() ?? 0.0,
-    timestamp: DateTime.fromMillisecondsSinceEpoch(m['ts'] as int),
+  factory LocationPoint.fromMap(Map<String, dynamic> map) => LocationPoint(
+    latitude:  (map['latitude']  as num?)?.toDouble() ?? 0.0,
+    longitude: (map['longitude'] as num?)?.toDouble() ?? 0.0,
+    heading:   (map['heading']   as num?)?.toDouble() ?? 0.0,
+    speed:     (map['speed']     as num?)?.toDouble() ?? 0.0,
+    accuracy:  (map['accuracy']  as num?)?.toDouble() ?? 0.0,
+    timestamp: map['timestamp'] != null
+        ? DateTime.parse(map['timestamp'] as String)
+        : DateTime.now(),
   );
 
   String toJson() => jsonEncode(toMap());
@@ -56,5 +58,6 @@ class LocationPoint extends Equatable {
       LocationPoint.fromMap(jsonDecode(src) as Map<String, dynamic>);
 
   @override
-  List<Object?> get props => [latitude, longitude, heading, speed, accuracy, timestamp];
+  List<Object?> get props =>
+      [latitude, longitude, heading, speed, accuracy, timestamp];
 }

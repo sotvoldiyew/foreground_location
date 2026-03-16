@@ -1,5 +1,3 @@
-// lib/src/feature/tracking/bloc/tracking_event.dart
-
 part of 'tracking_bloc.dart';
 
 sealed class TrackingEvent extends Equatable {

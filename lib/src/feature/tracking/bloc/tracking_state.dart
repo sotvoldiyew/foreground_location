@@ -1,5 +1,3 @@
-// lib/src/feature/tracking/bloc/tracking_state.dart
-
 part of 'tracking_bloc.dart';
 
 enum TrackingStatus { initial, loading, active, stopped, error }

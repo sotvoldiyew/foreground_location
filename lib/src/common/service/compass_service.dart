@@ -1,5 +1,3 @@
-// lib/src/common/service/compass_service.dart
-
 import 'package:flutter_compass/flutter_compass.dart';
 
 class CompassService {
